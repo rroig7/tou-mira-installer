@@ -5,6 +5,7 @@ A simple GUI installer for the TOU-Mira Among Us mod.
 import os
 import re
 import shutil
+import ssl
 import sys
 import tempfile
 import urllib.request
@@ -134,8 +135,15 @@ class InstallWorker(QObject):
         tmp_zip = None
         tmp_extract = None
         try:
-            # Set a User-Agent so GitHub doesn't reject the request
-            opener = urllib.request.build_opener()
+            # Set a User-Agent so GitHub doesn't reject the request.
+            # Disable SSL verification to work around certificate errors on
+            # some systems (e.g. outdated CA bundles or strict firewalls).
+            ssl_ctx = ssl.create_default_context()
+            ssl_ctx.check_hostname = False
+            ssl_ctx.verify_mode = ssl.CERT_NONE
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPSHandler(context=ssl_ctx)
+            )
             opener.addheaders = [("User-Agent", "TOU-Mira-Installer/1.0")]
             urllib.request.install_opener(opener)
 
