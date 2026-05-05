@@ -131,7 +131,8 @@ class InstallWorker(QObject):
         self.mod_url = mod_url
 
     def run(self):
-        tmp_path = None
+        tmp_zip = None
+        tmp_extract = None
         try:
             # Set a User-Agent so GitHub doesn't reject the request
             opener = urllib.request.build_opener()
@@ -141,38 +142,82 @@ class InstallWorker(QObject):
             self.log.emit(f"Downloading mod from:\n  {self.mod_url}")
 
             with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
-                tmp_path = tmp.name
+                tmp_zip = tmp.name
 
             def report_hook(blocks, block_size, total_size):
                 if total_size > 0:
                     downloaded = blocks * block_size
-                    pct = min(int(downloaded * 80 / total_size), 80)
+                    pct = min(int(downloaded * 75 / total_size), 75)
                     self.progress.emit(pct)
 
-            urllib.request.urlretrieve(self.mod_url, tmp_path, reporthook=report_hook)
-            self.progress.emit(80)
+            urllib.request.urlretrieve(self.mod_url, tmp_zip, reporthook=report_hook)
+            self.progress.emit(75)
             self.log.emit("Download complete.")
 
-            self.log.emit(f"Extracting to:\n  {self.install_path}")
-            with zipfile.ZipFile(tmp_path, "r") as zf:
+            # Extract into a temp directory first so we can detect and skip
+            # any wrapper folders (e.g. zip contains "tou/BepInEx/..." instead
+            # of "BepInEx/..." at the top level).
+            tmp_extract = tempfile.mkdtemp(prefix="toumira_extract_")
+            self.log.emit("Extracting archive…")
+            with zipfile.ZipFile(tmp_zip, "r") as zf:
                 members = zf.namelist()
                 total = max(len(members), 1)
                 for i, member in enumerate(members):
-                    zf.extract(member, self.install_path)
-                    pct = 80 + int((i + 1) * 20 / total)
-                    self.progress.emit(min(pct, 100))
+                    zf.extract(member, tmp_extract)
+                    pct = 75 + int((i + 1) * 15 / total)  # 75 -> 90
+                    self.progress.emit(min(pct, 90))
+
+            # Walk past any wrapper folders. Keep descending while the current
+            # directory has exactly one entry and that entry is a directory.
+            # Handles cases like:
+            #   zip/BepInEx/...           (no wrapper)        -> stays at root
+            #   zip/tou/BepInEx/...       (one wrapper)       -> descends 1x
+            #   zip/tou/tou/BepInEx/...   (nested wrapper)    -> descends 2x
+            content_root = Path(tmp_extract)
+            depth = 0
+            while True:
+                entries = list(content_root.iterdir())
+                if len(entries) == 1 and entries[0].is_dir():
+                    content_root = entries[0]
+                    depth += 1
+                else:
+                    break
+            if depth > 0:
+                self.log.emit(
+                    f"Detected {depth} wrapper folder(s); "
+                    f"using contents of '{content_root.name}'."
+                )
+
+            # Copy contents into the Among Us folder, merging with anything
+            # already there (dirs_exist_ok=True overwrites file-by-file).
+            self.log.emit(f"Installing files to:\n  {self.install_path}")
+            entries = list(content_root.iterdir())
+            if not entries:
+                raise RuntimeError("Archive appears to be empty after extraction.")
+            total = max(len(entries), 1)
+            dest_root = Path(self.install_path)
+            for i, entry in enumerate(entries):
+                dest = dest_root / entry.name
+                if entry.is_dir():
+                    shutil.copytree(entry, dest, dirs_exist_ok=True)
+                else:
+                    shutil.copy2(entry, dest)
+                pct = 90 + int((i + 1) * 10 / total)  # 90 -> 100
+                self.progress.emit(min(pct, 100))
 
             self.progress.emit(100)
-            self.log.emit("Extraction complete.")
+            self.log.emit("Installation complete.")
             self.finished.emit(True, f"{MOD_NAME} installed successfully!")
         except Exception as e:  # noqa: BLE001 - user-facing message
             self.finished.emit(False, f"Installation failed: {e}")
         finally:
-            if tmp_path and os.path.exists(tmp_path):
+            if tmp_zip and os.path.exists(tmp_zip):
                 try:
-                    os.unlink(tmp_path)
+                    os.unlink(tmp_zip)
                 except OSError:
                     pass
+            if tmp_extract and os.path.exists(tmp_extract):
+                shutil.rmtree(tmp_extract, ignore_errors=True)
 
 
 # --- Main window -------------------------------------------------------------
