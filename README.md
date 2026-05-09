@@ -5,4 +5,4 @@ pyinstaller --noconfirm --onefile --windowed --name "TOU-Mira-Installer-v1.0.X" 
 
 This is only a custom installer for TOU Mira. All credit goes to the TOU Mira team.
 
-Check out TOU Mira on [GitHub](https://github.com/tou-mira/tou-mira).
+Check out TOU Mira on [GitHub](https://github.com/AU-Avengers/TOU-Mira).
