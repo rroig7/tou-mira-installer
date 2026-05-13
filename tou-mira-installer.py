@@ -17,7 +17,9 @@ from qtpy.QtCore import QObject, QThread, Qt, Signal
 from qtpy.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QComboBox,
     QFileDialog,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -32,16 +34,17 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
+def _make_no_verify_ssl_ctx():
+    # Some environments (packaged exe, corporate proxies) intercept HTTPS with
+    # self-signed certs, so certificate verification must be disabled.
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    return ctx
+
+
 # --- Configuration -----------------------------------------------------------
-MOD_NAME = "TOU-Mira v1.6.1"
-STEAM_MOD_URL = (
-    "https://github.com/AU-Avengers/TOU-Mira/releases/download/"
-    "1.6.1/TouMira-v1.6.1-x86-steam-itch.zip"
-)
-EPIC_MOD_URL = (
-    "https://github.com/AU-Avengers/TOU-Mira/releases/download/"
-    "1.6.1/TouMira-v1.6.1-x64-epic-msstore.zip"
-)
+MOD_NAME = "Town of Us Mira"
 EPIC_STARTER_URL = (
     "https://github.com/whichtwix/EpicGamesStarter/releases/download/"
     "1.1.0/EpicGamesStarter.exe.zip"
@@ -52,6 +55,19 @@ BEPINEX_FOLDER = "BepInEx"
 EPIC_INSTALL_FOLDER_NAME = "Among Us - TOU Mira"
 PLATFORM_STEAM = "steam"
 PLATFORM_EPIC = "epic"
+GITHUB_API_URL = "https://api.github.com/repos/AU-Avengers/TOU-Mira/releases"
+VERSION_FILE = "toumira_version.txt"
+MANIFEST_FILE = "toumira_files.txt"
+
+
+def _version_gt(a, b):
+    """Return True if version string a is strictly greater than b."""
+    def _parts(v):
+        try:
+            return tuple(int(x) for x in v.split("."))
+        except ValueError:
+            return (0,)
+    return _parts(a) > _parts(b)
 
 
 # --- Steam detection ---------------------------------------------------------
@@ -168,6 +184,44 @@ def find_epic_among_us():
     return None
 
 
+# --- Release fetch worker ----------------------------------------------------
+class ReleaseFetchWorker(QObject):
+    """Fetches all TOU-Mira releases from GitHub on a background thread."""
+
+    releases_fetched = Signal(object)  # list of release dicts
+    error = Signal(str)
+
+    def run(self):
+        try:
+            req = urllib.request.Request(
+                GITHUB_API_URL,
+                headers={"User-Agent": "TOU-Mira-Installer/1.0"},
+            )
+            with urllib.request.urlopen(req, context=_make_no_verify_ssl_ctx(), timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+
+            releases = []
+            for release in data:
+                if release.get("draft") or release.get("prerelease"):
+                    continue
+                tag = release.get("tag_name", "").lstrip("v")
+                if not tag:
+                    continue
+                steam_url = epic_url = ""
+                for asset in release.get("assets", []):
+                    name = asset.get("name", "").lower()
+                    url = asset.get("browser_download_url", "")
+                    if name.endswith(".zip") and "steam" in name:
+                        steam_url = url
+                    elif name.endswith(".zip") and ("epic" in name or "msstore" in name):
+                        epic_url = url
+                releases.append({"version": tag, "steam_url": steam_url, "epic_url": epic_url})
+
+            self.releases_fetched.emit(releases)
+        except Exception as e:  # noqa: BLE001
+            self.error.emit(str(e))
+
+
 # --- Background worker -------------------------------------------------------
 class InstallWorker(QObject):
     """Downloads and installs the mod on a worker thread."""
@@ -177,21 +231,24 @@ class InstallWorker(QObject):
     finished = Signal(bool, str)  # success, message
 
     def __init__(self, platform, install_path, mod_url,
-                 source_path=None, starter_url=None):
+                 source_path=None, starter_url=None, mod_version=None):
         super().__init__()
         self.platform = platform
         self.install_path = install_path
         self.mod_url = mod_url
         self.source_path = source_path  # Epic only: original Among Us folder
         self.starter_url = starter_url  # Epic only
+        self.mod_version = mod_version or ""
+
+    def _write_file_safe(self, filename, content):
+        try:
+            (Path(self.install_path) / filename).write_text(content, encoding="utf-8")
+        except OSError:
+            pass
 
     def _setup_opener(self):
-        """Install a global urllib opener that skips SSL verification."""
-        ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
         opener = urllib.request.build_opener(
-            urllib.request.HTTPSHandler(context=ssl_ctx)
+            urllib.request.HTTPSHandler(context=_make_no_verify_ssl_ctx())
         )
         opener.addheaders = [("User-Agent", "TOU-Mira-Installer/1.0")]
         urllib.request.install_opener(opener)
@@ -211,7 +268,12 @@ class InstallWorker(QObject):
         self.log.emit("Download complete.")
 
     def _extract_and_copy(self, tmp_zip, dest_root, progress_start, progress_end):
-        """Extract zip into dest_root, walking past any wrapper folders."""
+        """Extract zip into dest_root, walking past any wrapper folders.
+
+        Returns a list of paths (relative to dest_root, as strings) for every
+        file and directory that was written — used to build the uninstall manifest.
+        """
+        installed = []
         tmp_extract = None
         try:
             tmp_extract = tempfile.mkdtemp(prefix="toumira_extract_")
@@ -247,17 +309,23 @@ class InstallWorker(QObject):
                 raise RuntimeError("Archive appears to be empty after extraction.")
             total = max(len(entries), 1)
             copy_base = progress_start + extract_span
+            dest_root_path = Path(dest_root)
             for i, entry in enumerate(entries):
-                dst = Path(dest_root) / entry.name
+                dst = dest_root_path / entry.name
                 if entry.is_dir():
                     shutil.copytree(entry, dst, dirs_exist_ok=True)
+                    # Record every file and directory placed under dst
+                    for item in dst.rglob("*"):
+                        installed.append(str(item.relative_to(dest_root_path)))
                 else:
                     shutil.copy2(entry, dst)
+                    installed.append(str(dst.relative_to(dest_root_path)))
                 pct = copy_base + int((i + 1) * copy_span / total)
                 self.progress.emit(min(pct, progress_end))
         finally:
             if tmp_extract and os.path.exists(tmp_extract):
                 shutil.rmtree(tmp_extract, ignore_errors=True)
+        return installed
 
     def run(self):
         if self.platform == PLATFORM_EPIC:
@@ -275,12 +343,14 @@ class InstallWorker(QObject):
 
             self._download_mod_zip(tmp_zip, progress_start=0, progress_end=75)
             self.log.emit(f"Installing files to:\n  {self.install_path}")
-            self._extract_and_copy(tmp_zip, self.install_path,
-                                   progress_start=75, progress_end=100)
+            installed = self._extract_and_copy(tmp_zip, self.install_path,
+                                               progress_start=75, progress_end=100)
 
             self.progress.emit(100)
+            self._write_file_safe(VERSION_FILE, self.mod_version)
+            self._write_file_safe(MANIFEST_FILE, "\n".join(installed))
             self.log.emit("Installation complete.")
-            self.finished.emit(True, f"{MOD_NAME} installed successfully!")
+            self.finished.emit(True, f"TOU-Mira v{self.mod_version} installed successfully!")
         except Exception as e:  # noqa: BLE001
             self.finished.emit(False, f"Installation failed: {e}")
         finally:
@@ -352,14 +422,16 @@ class InstallWorker(QObject):
 
             # Step 4: Extract and copy mod files (75–100%)
             self.log.emit(f"Installing mod files to:\n  {self.install_path}")
-            self._extract_and_copy(tmp_zip, self.install_path,
-                                   progress_start=75, progress_end=100)
+            installed = self._extract_and_copy(tmp_zip, self.install_path,
+                                               progress_start=75, progress_end=100)
 
             self.progress.emit(100)
+            self._write_file_safe(VERSION_FILE, self.mod_version)
+            self._write_file_safe(MANIFEST_FILE, "\n".join(installed))
             self.log.emit("Installation complete.")
             self.finished.emit(
                 True,
-                f"{MOD_NAME} installed successfully!\n\n"
+                f"TOU-Mira v{self.mod_version} installed successfully!\n\n"
                 f"Launch the game using EpicGamesStarter.exe inside:\n{self.install_path}"
             )
         except Exception as e:  # noqa: BLE001
@@ -383,6 +455,10 @@ class MainWindow(QMainWindow):
         self.epic_source_path = None  # Epic: original Among Us dir in Program Files
         self.thread = None
         self.worker = None
+        self._releases = []
+        self._update_version = None
+        self._fetch_thread = None
+        self._fetch_worker = None
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -398,6 +474,21 @@ class MainWindow(QMainWindow):
         )
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
+
+        # --- Update banner (hidden until an update is detected) ---
+        self.update_banner = QFrame()
+        self.update_banner.setStyleSheet(
+            "QFrame { background-color: #FFF3CD; border: 1px solid #FFC107; "
+            "border-radius: 4px; padding: 4px; } "
+            "QLabel { color: #1a1a1a; background: transparent; }"
+        )
+        update_banner_row = QHBoxLayout(self.update_banner)
+        update_banner_row.setContentsMargins(8, 4, 8, 4)
+        self.update_label = QLabel()
+        self.update_label.setWordWrap(True)
+        update_banner_row.addWidget(self.update_label, 1)
+        self.update_banner.setVisible(False)
+        layout.addWidget(self.update_banner)
 
         # --- Platform selector ---
         platform_box = QGroupBox("Platform")
@@ -463,6 +554,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._epic_widget)
         self._epic_widget.setVisible(False)
 
+        # --- Version selector ---
+        version_row = QHBoxLayout()
+        version_row.addWidget(QLabel("Version:"))
+        self.version_combo = QComboBox()
+        self.version_combo.addItem("Loading versions…")
+        self.version_combo.setEnabled(False)
+        self.version_combo.currentIndexChanged.connect(self._update_button_states)
+        version_row.addWidget(self.version_combo, 1)
+        layout.addLayout(version_row)
+
         # Log
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
@@ -473,14 +574,23 @@ class MainWindow(QMainWindow):
         self.progress.setRange(0, 100)
         layout.addWidget(self.progress)
 
-        # Install button
+        # Bottom button row
+        btn_row = QHBoxLayout()
+        self.uninstall_btn = QPushButton("Uninstall Mod")
+        self.uninstall_btn.setMinimumHeight(40)
+        self.uninstall_btn.setEnabled(False)
+        self.uninstall_btn.clicked.connect(self.uninstall_mod)
+        btn_row.addWidget(self.uninstall_btn)
+
         self.install_btn = QPushButton("Install Mod")
         self.install_btn.setMinimumHeight(40)
+        self.install_btn.setEnabled(False)
         font = self.install_btn.font()
         font.setBold(True)
         self.install_btn.setFont(font)
         self.install_btn.clicked.connect(self.start_install)
-        layout.addWidget(self.install_btn)
+        btn_row.addWidget(self.install_btn)
+        layout.addLayout(btn_row)
 
         self.setCentralWidget(central)
 
@@ -489,6 +599,7 @@ class MainWindow(QMainWindow):
         self.btn_epic.toggled.connect(self._on_platform_changed)
 
         self._detect_paths()
+        self._fetch_releases()
 
     # -- helpers --
     def log(self, message):
@@ -503,6 +614,210 @@ class MainWindow(QMainWindow):
         self._epic_widget.setVisible(is_epic)
         self.log_box.clear()
         self._detect_paths()
+
+    # -- release fetching --
+    def _read_installed_version(self):
+        if not self.install_path:
+            return "0"
+        version_path = Path(self.install_path) / VERSION_FILE
+        try:
+            return version_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            return "0"
+
+    def _fetch_releases(self):
+        self.version_combo.clear()
+        self.version_combo.addItem("Loading versions…")
+        self.version_combo.setEnabled(False)
+        self.install_btn.setEnabled(False)
+        self.log("Fetching available versions from GitHub…")
+
+        thread = QThread()
+        worker = ReleaseFetchWorker()
+        self._fetch_thread = thread
+        self._fetch_worker = worker
+
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.releases_fetched.connect(self._on_releases_fetched)
+        worker.error.connect(self._on_fetch_error)
+        for sig in (worker.releases_fetched, worker.error):
+            sig.connect(thread.quit)
+            sig.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(lambda: setattr(self, "_fetch_thread", None))
+        thread.finished.connect(lambda: setattr(self, "_fetch_worker", None))
+        thread.start()
+
+    def _on_releases_fetched(self, releases):
+        self._releases = releases
+        self.version_combo.clear()
+
+        if not releases:
+            self.version_combo.addItem("No releases found")
+            self.log("No releases found on GitHub.")
+            return
+
+        for i, release in enumerate(releases):
+            label = f"v{release['version']}" + (" (latest)" if i == 0 else "")
+            self.version_combo.addItem(label)
+
+        self.version_combo.setEnabled(True)
+        self.log(f"Found {len(releases)} release(s). Latest: v{releases[0]['version']}")
+        self._refresh_update_state()
+
+    def _on_fetch_error(self, error_msg):
+        self.version_combo.clear()
+        self.version_combo.addItem("Failed to load versions")
+        self.log(f"Could not fetch releases: {error_msg}")
+
+    def _refresh_update_state(self):
+        """Update the banner and button text based on installed vs latest version."""
+        if not self._releases:
+            return
+        latest = self._releases[0]["version"]
+        installed = self._read_installed_version()
+        if self._is_mod_installed() and _version_gt(latest, installed):
+            self._update_version = latest
+            self.update_label.setText(
+                f"<b>Update available:</b> TOU-Mira v{latest} is ready to install."
+            )
+            self.update_banner.setVisible(True)
+            self.log(f"Update available: v{latest} (installed: v{installed})")
+        else:
+            self._update_version = None
+            self.update_banner.setVisible(False)
+            if self._is_mod_installed():
+                self.log(f"TOU-Mira is up to date (v{installed}).")
+        self._update_button_states()
+
+    def _is_mod_installed(self):
+        if not self.install_path:
+            return False
+        if self._current_platform() == PLATFORM_STEAM:
+            return (Path(self.install_path) / BEPINEX_FOLDER).exists()
+        return (Path(self.install_path) / VERSION_FILE).exists()
+
+    def _update_button_states(self):
+        has_releases = bool(self._releases)
+        installed = self._is_mod_installed()
+        self.install_btn.setEnabled(has_releases)
+        self.uninstall_btn.setEnabled(installed)
+        if self._update_version and installed:
+            self.install_btn.setText("Update Mod")
+        else:
+            self.install_btn.setText("Install Mod")
+
+    def uninstall_mod(self):
+        platform = self._current_platform()
+        if platform == PLATFORM_STEAM:
+            self._uninstall_steam()
+        else:
+            self._uninstall_epic()
+        self._update_button_states()
+
+    def _uninstall_steam(self):
+        install_path = Path(self.install_path)
+        manifest_path = install_path / MANIFEST_FILE
+        if manifest_path.exists():
+            self._uninstall_steam_via_manifest(install_path, manifest_path)
+        else:
+            self._uninstall_steam_fallback(install_path)
+
+    def _uninstall_steam_via_manifest(self, install_path, manifest_path):
+        try:
+            entries = [
+                line for line in manifest_path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+        except OSError as e:
+            QMessageBox.critical(self, "Error", f"Could not read uninstall manifest:\n{e}")
+            return
+
+        reply = QMessageBox.question(
+            self, "Uninstall mod",
+            f"This will remove {len(entries)} mod file(s) from:\n{self.install_path}\n\n"
+            "Among Us itself will not be affected. Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        files, dirs = [], []
+        for entry in entries:
+            p = install_path / entry
+            if p.is_file():
+                files.append(p)
+            elif p.is_dir():
+                dirs.append(p)
+        # rmdir only removes empty dirs, so delete files first then prune deepest dirs first
+        dirs.sort(key=lambda p: len(p.parts), reverse=True)
+
+        errors = []
+        for f in files:
+            try:
+                f.unlink()
+            except OSError as e:
+                errors.append(str(e))
+        for d in dirs:
+            try:
+                d.rmdir()
+            except OSError:
+                pass  # not empty or already gone — leave it
+
+        for meta in (manifest_path, install_path / VERSION_FILE):
+            try:
+                meta.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        if errors:
+            self.log(f"Uninstall finished with {len(errors)} error(s).")
+            QMessageBox.warning(self, "Uninstall incomplete",
+                f"{len(errors)} file(s) could not be removed. "
+                "Make sure Among Us is closed and try again.")
+        else:
+            self.log("Mod uninstalled successfully.")
+            QMessageBox.information(self, "Uninstalled", "TOU-Mira has been uninstalled.")
+
+    def _uninstall_steam_fallback(self, install_path):
+        bepinex = install_path / BEPINEX_FOLDER
+        reply = QMessageBox.question(
+            self, "Uninstall mod",
+            f"No file manifest found. This will remove the '{BEPINEX_FOLDER}' folder from:\n"
+            f"{self.install_path}\n\nAmong Us itself will not be affected. Continue?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            shutil.rmtree(bepinex)
+            (install_path / VERSION_FILE).unlink(missing_ok=True)
+            self.log("Mod uninstalled successfully.")
+            QMessageBox.information(self, "Uninstalled", "TOU-Mira has been uninstalled.")
+        except OSError as e:
+            QMessageBox.critical(self, "Error",
+                f"Could not uninstall the mod:\n{e}\n\nMake sure Among Us is closed.")
+
+    def _uninstall_epic(self):
+        dest = Path(self.install_path)
+        if not dest.exists():
+            QMessageBox.warning(self, "Not found", f'"{dest}" does not exist.')
+            return
+        reply = QMessageBox.question(
+            self, "Uninstall mod",
+            f'This will permanently delete:\n{self.install_path}\n\nContinue?',
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            shutil.rmtree(dest)
+            self.log("Mod uninstalled successfully.")
+            QMessageBox.information(self, "Uninstalled", "TOU-Mira has been uninstalled.")
+        except OSError as e:
+            QMessageBox.critical(self, "Error",
+                f"Could not delete the folder:\n{e}\n\nMake sure Among Us is closed.")
 
     def _detect_paths(self):
         if self._current_platform() == PLATFORM_STEAM:
@@ -536,6 +851,7 @@ class MainWindow(QMainWindow):
             self.install_path = default_dest
             self.epic_dest_edit.setText(default_dest)
             self.log(f"Default install location: {default_dest}")
+        self._refresh_update_state()
 
     # -- browse callbacks --
     def _browse_steam(self):
@@ -572,24 +888,39 @@ class MainWindow(QMainWindow):
             self.log(f"Install destination: {dest}")
 
     # -- install flow --
-    def start_install(self):
-        platform = self._current_platform()
+    def _selected_release(self):
+        idx = self.version_combo.currentIndex()
+        if 0 <= idx < len(self._releases):
+            return self._releases[idx]
+        return None
 
-        if not self.install_path or (
-            platform == PLATFORM_STEAM and not os.path.isdir(self.install_path)
-        ):
+    def start_install(self):
+        release = self._selected_release()
+        if not release:
+            return
+
+        platform = self._current_platform()
+        mod_url = release["steam_url"] if platform == PLATFORM_STEAM else release["epic_url"]
+        mod_version = release["version"]
+
+        if not mod_url:
             QMessageBox.warning(
-                self, "No folder selected",
-                "Please select your Among Us folder first."
+                self, "No download URL",
+                f"No {platform.capitalize()} download found for v{mod_version}.\n"
+                "Try selecting a different version."
             )
             return
 
         if platform == PLATFORM_STEAM:
-            self._start_steam_install()
+            if not self.install_path or not os.path.isdir(self.install_path):
+                QMessageBox.warning(self, "No folder selected",
+                    "Please select your Among Us folder first.")
+                return
+            self._start_steam_install(mod_url, mod_version)
         else:
-            self._start_epic_install()
+            self._start_epic_install(mod_url, mod_version)
 
-    def _start_steam_install(self):
+    def _start_steam_install(self, mod_url, mod_version):
         if not (Path(self.install_path) / AMONG_US_EXE).exists():
             reply = QMessageBox.question(
                 self, "Among Us.exe not found",
@@ -625,15 +956,14 @@ class MainWindow(QMainWindow):
         self._launch_worker(
             platform=PLATFORM_STEAM,
             install_path=self.install_path,
-            mod_url=STEAM_MOD_URL,
+            mod_url=mod_url,
+            mod_version=mod_version,
         )
 
-    def _start_epic_install(self):
+    def _start_epic_install(self, mod_url, mod_version):
         if not self.epic_source_path or not os.path.isdir(self.epic_source_path):
-            QMessageBox.warning(
-                self, "No source folder",
-                "Please select your Epic Games Among Us folder first."
-            )
+            QMessageBox.warning(self, "No source folder",
+                "Please select your Epic Games Among Us folder first.")
             return
 
         if not (Path(self.epic_source_path) / AMONG_US_EXE).exists():
@@ -647,7 +977,6 @@ class MainWindow(QMainWindow):
                 return
 
         dest = Path(self.install_path)
-        # Warn if inside Program Files
         try:
             dest.relative_to(Path(r"C:\Program Files"))
             in_program_files = True
@@ -659,12 +988,10 @@ class MainWindow(QMainWindow):
                 in_program_files = False
 
         if in_program_files:
-            QMessageBox.warning(
-                self, "Invalid destination",
+            QMessageBox.warning(self, "Invalid destination",
                 "The destination folder is inside Program Files.\n\n"
                 "EpicGamesStarter cannot launch the game from there. "
-                "Please choose a different location such as your Desktop."
-            )
+                "Please choose a different location such as your Desktop.")
             return
 
         if dest.exists():
@@ -681,13 +1008,16 @@ class MainWindow(QMainWindow):
         self._launch_worker(
             platform=PLATFORM_EPIC,
             install_path=self.install_path,
-            mod_url=EPIC_MOD_URL,
+            mod_url=mod_url,
             source_path=self.epic_source_path,
             starter_url=EPIC_STARTER_URL,
+            mod_version=mod_version,
         )
 
     def _launch_worker(self, **kwargs):
         self.install_btn.setEnabled(False)
+        self.uninstall_btn.setEnabled(False)
+        self.version_combo.setEnabled(False)
         self.steam_browse_btn.setEnabled(False)
         self.epic_source_btn.setEnabled(False)
         self.epic_dest_btn.setEnabled(False)
@@ -710,17 +1040,17 @@ class MainWindow(QMainWindow):
 
     def on_install_finished(self, success, message):
         self.log(message)
-        self.install_btn.setEnabled(True)
+        self.version_combo.setEnabled(bool(self._releases))
         self.steam_browse_btn.setEnabled(True)
         self.epic_source_btn.setEnabled(True)
         self.epic_dest_btn.setEnabled(True)
         self.btn_steam.setEnabled(True)
         self.btn_epic.setEnabled(True)
-        self.install_btn.setText("Install Mod")
         if success:
             QMessageBox.information(self, "Success", message)
         else:
             QMessageBox.critical(self, "Error", message)
+        self._refresh_update_state()
 
 
 # --- Entry point -------------------------------------------------------------
