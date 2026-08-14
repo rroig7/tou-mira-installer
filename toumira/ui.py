@@ -373,6 +373,16 @@ class MainWindow(QMainWindow):
             except OSError:
                 pass  # not empty or already gone — leave it
 
+        # BepInEx accumulates runtime files (logs, config, cache) that were never
+        # in the manifest, so it survives the per-file cleanup above. Remove
+        # whatever remains so the mod is no longer detected as installed.
+        bepinex = install_path / BEPINEX_FOLDER
+        if bepinex.exists():
+            try:
+                shutil.rmtree(bepinex)
+            except OSError as e:
+                errors.append(str(e))
+
         metadata.remove_metadata(install_path)
 
         if errors:

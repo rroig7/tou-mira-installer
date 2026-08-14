@@ -47,7 +47,8 @@ class InstallWorker(QObject):
     def _download_mod_zip(self, tmp_zip, progress_start, progress_end):
         self.log.emit(f"Downloading mod from:\n  {self.mod_url}")
         net.download_file(self.mod_url, tmp_zip, on_progress=self.progress.emit,
-                          progress_start=progress_start, progress_end=progress_end)
+                          progress_start=progress_start, progress_end=progress_end,
+                          on_log=self.log.emit)
         self.log.emit("Download complete.")
 
     def _install_mod_files(self, tmp_zip, progress_start, progress_end):
@@ -67,7 +68,6 @@ class InstallWorker(QObject):
     # -- entry point --
     def run(self):
         try:
-            net.install_opener()
             if self.platform == PLATFORM_EPIC:
                 self._run_epic()
             else:
@@ -103,7 +103,7 @@ class InstallWorker(QObject):
         # Step 2: Download and unzip EpicGamesStarter.exe (30–40%)
         self.log.emit("Downloading EpicGamesStarter.exe…")
         with _temp_zip() as starter_zip:
-            net.download_file(self.starter_url, starter_zip)
+            net.download_file(self.starter_url, starter_zip, on_log=self.log.emit)
             archive.extract_single_exe(starter_zip, dest, "EpicGamesStarter.exe")
         self.progress.emit(40)
         self.log.emit("EpicGamesStarter.exe downloaded.")

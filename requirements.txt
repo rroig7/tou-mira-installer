@@ -1,2 +1,6 @@
 qtpy>=2.4.0
 PySide6>=6.5.0
+# Lets TLS verification use the OS trust store (handles corporate proxies whose
+# root CA is installed system-wide), so the insecure no-verify fallback is rarely
+# needed. Optional at runtime — net.py degrades gracefully if it is absent.
+truststore>=0.9.0
