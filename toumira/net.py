@@ -5,7 +5,9 @@ normal networks. If (and only if) the TLS handshake fails — e.g. a corporate
 proxy or packaged-exe environment intercepting HTTPS with a self-signed cert —
 the request is retried with verification disabled. That fallback trades away
 authenticity, so it is a last resort and is surfaced to the caller via
-``on_log``.
+``on_log``. Callers that must not accept unauthenticated data (e.g. the
+installer self-update, which executes what it downloads) pass
+``allow_insecure=False``.
 """
 import ssl
 import urllib.error
@@ -76,12 +78,13 @@ def _is_ssl_error(exc):
     return isinstance(getattr(exc, "reason", None), ssl.SSLError)
 
 
-def _run_with_fallback(operation, on_log=None):
-    """Run ``operation(opener)`` verified; on a TLS failure retry unverified."""
+def _run_with_fallback(operation, on_log=None, allow_insecure=True):
+    """Run ``operation(opener)`` verified; on a TLS failure retry unverified
+    (unless ``allow_insecure`` is False, in which case the error propagates)."""
     try:
         return operation(_verified_opener())
     except (urllib.error.URLError, ssl.SSLError) as exc:
-        if not _is_ssl_error(exc):
+        if not allow_insecure or not _is_ssl_error(exc):
             raise
         if on_log:
             on_log(
@@ -91,14 +94,15 @@ def _run_with_fallback(operation, on_log=None):
         return operation(_no_verify_opener())
 
 
-def open_url(url, timeout=10, on_log=None):
+def open_url(url, timeout=10, on_log=None, allow_insecure=True):
     """Open ``url`` (verified, then unverified on TLS failure). Returns a response."""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
-    return _run_with_fallback(lambda opener: opener.open(req, timeout=timeout), on_log)
+    return _run_with_fallback(lambda opener: opener.open(req, timeout=timeout),
+                              on_log, allow_insecure)
 
 
 def download_file(url, dest, on_progress=None, progress_start=0, progress_end=100,
-                  on_log=None, timeout=30):
+                  on_log=None, timeout=30, allow_insecure=True):
     """Download ``url`` to ``dest`` (verified, then unverified on TLS failure).
 
     ``on_progress`` (if given) is called with an integer percentage clamped to
@@ -123,4 +127,4 @@ def download_file(url, dest, on_progress=None, progress_start=0, progress_end=10
         if on_progress:
             on_progress(progress_end)
 
-    _run_with_fallback(_do, on_log)
+    _run_with_fallback(_do, on_log, allow_insecure)

@@ -3,10 +3,12 @@ import sys
 
 from qtpy.QtWidgets import QApplication
 
+from toumira import updater
 from toumira.ui import MainWindow
 
 
 def main():
+    updater.schedule_old_exe_cleanup(sys.argv)
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

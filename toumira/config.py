@@ -20,9 +20,18 @@ EPIC_STARTER_URL = (
     "1.1.0/EpicGamesStarter.exe.zip"
 )
 
+# --- Installer self-update ---------------------------------------------------
+# Single source of truth for the installer's version. Must match the GitHub
+# release tag (``v<APP_VERSION>``) or users will be prompted to update forever.
+APP_VERSION = "1.2.0"
+APP_RELEASES_API_URL = (
+    "https://api.github.com/repos/rroig7/tou-mira-installer/releases/latest"
+)
+APP_RELEASES_PAGE_URL = "https://github.com/rroig7/tou-mira-installer/releases/latest"
+
 # --- Install metadata files (written into the install folder) ----------------
 VERSION_FILE = "toumira_version.txt"
 MANIFEST_FILE = "toumira_files.txt"
 
 # --- HTTP --------------------------------------------------------------------
-USER_AGENT = "TOU-Mira-Installer/1.0"
+USER_AGENT = f"TOU-Mira-Installer/{APP_VERSION}"

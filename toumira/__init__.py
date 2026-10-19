@@ -11,11 +11,12 @@ focused modules:
 * :mod:`toumira.metadata`      – install version/manifest bookkeeping
 * :mod:`toumira.releases`      – GitHub release parsing and fetch worker
 * :mod:`toumira.installer`     – background install worker
+* :mod:`toumira.updater`       – self-update of the installer exe
 * :mod:`toumira.ui`            – the Qt main window
 * :mod:`toumira.app`           – application entry point
 """
 
 from toumira.app import main
+from toumira.config import APP_VERSION as __version__
 
 __all__ = ["main"]
-__version__ = "1.0.0"

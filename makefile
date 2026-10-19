@@ -4,7 +4,8 @@ PIP = $(PYTHON) -m pip
 
 ENTRY = main.py
 ICON = assets/icon.png
-VERSION = 1.1.1
+# Read from toumira/config.py so the exe name always matches the embedded version
+VERSION = $(shell python -c "import runpy; print(runpy.run_path('toumira/config.py')['APP_VERSION'])")
 APP_NAME = TOU-Mira-Installer-v$(VERSION)
 
 .PHONY: run install build clean

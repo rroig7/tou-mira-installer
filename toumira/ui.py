@@ -3,8 +3,10 @@ import os
 import shutil
 from pathlib import Path
 
-from qtpy.QtCore import QThread
+from qtpy.QtCore import Qt, QThread, QUrl
+from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
+    QApplication,
     QButtonGroup,
     QComboBox,
     QFileDialog,
@@ -16,6 +18,7 @@ from qtpy.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QProgressBar,
+    QProgressDialog,
     QPushButton,
     QRadioButton,
     QTextEdit,
@@ -23,9 +26,11 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from toumira import metadata
+from toumira import metadata, updater
 from toumira.config import (
     AMONG_US_EXE,
+    APP_RELEASES_PAGE_URL,
+    APP_VERSION,
     BEPINEX_FOLDER,
     EPIC_INSTALL_FOLDER_NAME,
     EPIC_STARTER_URL,
@@ -71,6 +76,13 @@ class MainWindow(QMainWindow):
         self._update_version = None
         self._fetch_thread = None
         self._fetch_worker = None
+        self._installing = False
+        self._pending_app_update = None  # deferred until a running install finishes
+        self._app_check_thread = None
+        self._app_check_worker = None
+        self._app_update_thread = None
+        self._app_update_worker = None
+        self._app_update_dialog = None
 
         self._build_ui()
 
@@ -80,6 +92,8 @@ class MainWindow(QMainWindow):
 
         self._detect_paths()
         self._fetch_releases()
+        if updater.current_exe():
+            self._check_for_app_update()
 
     # -- UI construction --
     def _build_ui(self):
@@ -320,6 +334,105 @@ class MainWindow(QMainWindow):
             self.install_btn.setText("Update Mod")
         else:
             self.install_btn.setText("Install Mod")
+
+    # -- installer self-update --
+    def _run_in_thread(self, worker, done_signals):
+        """Run ``worker.run`` on a new QThread, torn down when any of
+        ``done_signals`` fires. Returns the thread."""
+        thread = QThread()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        for sig in done_signals:
+            sig.connect(thread.quit)
+            sig.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.start()
+        return thread
+
+    def _check_for_app_update(self):
+        worker = updater.UpdateCheckWorker()
+        worker.update_available.connect(self._on_app_update_available)
+        worker.error.connect(
+            lambda msg: self.log(f"Could not check for installer updates: {msg}")
+        )
+        self._app_check_worker = worker
+        self._app_check_thread = self._run_in_thread(
+            worker, (worker.update_available, worker.error)
+        )
+
+    def _on_app_update_available(self, info):
+        if not info:
+            return
+        self.log(f"Installer update available: v{info['version']} (current: v{APP_VERSION})")
+        if self._installing:
+            self._pending_app_update = info
+        else:
+            self._prompt_app_update(info)
+
+    def _prompt_app_update(self, info):
+        reply = QMessageBox.question(
+            self, "Installer update available",
+            f"A new version of the {MOD_NAME} Installer is available.\n\n"
+            f"Current version: v{APP_VERSION}\n"
+            f"New version: v{info['version']}\n\n"
+            "Download it and restart now?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if reply != QMessageBox.Yes:
+            self.log("Installer update skipped.")
+            return
+        if not info["exe_url"]:
+            self._offer_release_page("The new release has no installer download attached.")
+            return
+        self._start_app_update(info)
+
+    def _start_app_update(self, info):
+        self._set_controls_enabled(False)
+        self.log(f"Downloading installer v{info['version']}…")
+
+        dialog = QProgressDialog(
+            f"Downloading installer v{info['version']}…", "", 0, 100, self
+        )
+        dialog.setCancelButton(None)  # download can't be interrupted mid-way
+        dialog.setWindowTitle("Updating installer")
+        dialog.setWindowModality(Qt.WindowModal)
+        dialog.setMinimumDuration(0)
+        dialog.setAutoClose(False)
+        dialog.setValue(0)
+        dialog.show()
+        self._app_update_dialog = dialog
+
+        worker = updater.UpdateDownloadWorker(info)
+        worker.progress.connect(dialog.setValue)
+        worker.finished.connect(self._on_app_update_downloaded)
+        self._app_update_worker = worker
+        self._app_update_thread = self._run_in_thread(worker, (worker.finished,))
+
+    def _on_app_update_downloaded(self, success, result):
+        self._app_update_dialog.close()
+        self._app_update_dialog = None
+        if success:
+            try:
+                updater.launch_new_version(result)
+            except OSError as e:
+                success, result = False, f"Could not start the new installer:\n{e}"
+        if not success:
+            self.log(f"Installer update failed: {result}")
+            self._set_controls_enabled(True)
+            self._update_button_states()
+            self._offer_release_page(f"The installer could not be updated:\n{result}")
+            return
+        self.log("Restarting into the new installer…")
+        QApplication.instance().quit()
+
+    def _offer_release_page(self, reason):
+        reply = QMessageBox.question(
+            self, "Installer update",
+            f"{reason}\n\nOpen the download page in your browser instead?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            QDesktopServices.openUrl(QUrl(APP_RELEASES_PAGE_URL))
 
     # -- uninstall flow --
     def uninstall_mod(self):
@@ -620,6 +733,7 @@ class MainWindow(QMainWindow):
         )
 
     def _launch_worker(self, **kwargs):
+        self._installing = True
         self._set_controls_enabled(False)
         self.install_btn.setText("Installing…")
         self.progress.setValue(0)
@@ -648,6 +762,7 @@ class MainWindow(QMainWindow):
         self.btn_epic.setEnabled(enabled)
 
     def on_install_finished(self, success, message):
+        self._installing = False
         self.log(message)
         self._set_controls_enabled(True)
         if success:
@@ -655,3 +770,6 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "Error", message)
         self._refresh_update_state()
+        if self._pending_app_update:
+            info, self._pending_app_update = self._pending_app_update, None
+            self._prompt_app_update(info)
