@@ -8,6 +8,7 @@ from qtpy.QtGui import QDesktopServices
 from qtpy.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -26,12 +27,14 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from toumira import metadata, updater
+from toumira import bettercrewlink, metadata, updater
 from toumira.config import (
     AMONG_US_EXE,
     APP_RELEASES_PAGE_URL,
     APP_VERSION,
     BEPINEX_FOLDER,
+    BETTERCREWLINK_NAME,
+    BETTERCREWLINK_REPO_URL,
     EPIC_INSTALL_FOLDER_NAME,
     EPIC_STARTER_URL,
     MOD_NAME,
@@ -117,6 +120,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._build_epic_widget())
         self._epic_widget.setVisible(False)
         layout.addLayout(self._build_version_row())
+        layout.addLayout(self._build_bettercrewlink_row())
 
         # Log
         self.log_box = QTextEdit()
@@ -218,6 +222,31 @@ class MainWindow(QMainWindow):
         self.version_combo.currentIndexChanged.connect(self._update_button_states)
         version_row.addWidget(self.version_combo, 1)
         return version_row
+
+    def _build_bettercrewlink_row(self):
+        row = QHBoxLayout()
+        self.bcl_checkbox = QCheckBox(
+            f"Also install {BETTERCREWLINK_NAME} (proximity voice chat)"
+        )
+        row.addWidget(self.bcl_checkbox)
+        link = QLabel(f'<a href="{BETTERCREWLINK_REPO_URL}">What is this?</a>')
+        link.setOpenExternalLinks(True)
+        row.addWidget(link)
+        row.addStretch()
+        self.bcl_status_label = QLabel()
+        self.bcl_status_label.setStyleSheet("color: gray; font-size: 11px;")
+        row.addWidget(self.bcl_status_label)
+        self._refresh_bettercrewlink_status()
+        return row
+
+    def _refresh_bettercrewlink_status(self):
+        version = bettercrewlink.installed_version()
+        if version is None:
+            self.bcl_status_label.setText("Not installed")
+        else:
+            self.bcl_status_label.setText(
+                f"Installed: v{version}" if version else "Installed"
+            )
 
     def _build_button_row(self):
         btn_row = QHBoxLayout()
@@ -739,7 +768,9 @@ class MainWindow(QMainWindow):
         self.progress.setValue(0)
 
         self.thread = QThread()
-        self.worker = InstallWorker(**kwargs)
+        self.worker = InstallWorker(
+            install_bettercrewlink=self.bcl_checkbox.isChecked(), **kwargs
+        )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress.setValue)
@@ -760,6 +791,7 @@ class MainWindow(QMainWindow):
         self.epic_dest_btn.setEnabled(enabled)
         self.btn_steam.setEnabled(enabled)
         self.btn_epic.setEnabled(enabled)
+        self.bcl_checkbox.setEnabled(enabled)
 
     def on_install_finished(self, success, message):
         self._installing = False
@@ -770,6 +802,7 @@ class MainWindow(QMainWindow):
         else:
             QMessageBox.critical(self, "Error", message)
         self._refresh_update_state()
+        self._refresh_bettercrewlink_status()
         if self._pending_app_update:
             info, self._pending_app_update = self._pending_app_update, None
             self._prompt_app_update(info)

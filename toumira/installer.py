@@ -7,7 +7,7 @@ from pathlib import Path
 
 from qtpy.QtCore import QObject, Signal
 
-from toumira import archive, metadata, net
+from toumira import archive, bettercrewlink, metadata, net
 from toumira.config import PLATFORM_EPIC
 
 
@@ -34,7 +34,8 @@ class InstallWorker(QObject):
     finished = Signal(bool, str)  # success, message
 
     def __init__(self, platform, install_path, mod_url,
-                 source_path=None, starter_url=None, mod_version=None):
+                 source_path=None, starter_url=None, mod_version=None,
+                 install_bettercrewlink=False):
         super().__init__()
         self.platform = platform
         self.install_path = install_path
@@ -42,11 +43,19 @@ class InstallWorker(QObject):
         self.source_path = source_path  # Epic only: original Among Us folder
         self.starter_url = starter_url  # Epic only
         self.mod_version = mod_version or ""
+        self.install_bettercrewlink = install_bettercrewlink
+        # Mod phases are written against a 0–100 bar; when BetterCrewLink is
+        # also installed they are squeezed into 0–60 and it takes 60–100.
+        self._mod_progress_end = 60 if install_bettercrewlink else 100
+
+    def _report_progress(self, pct):
+        """Emit a mod-phase percentage, scaled into the mod's share of the bar."""
+        self.progress.emit(int(pct * self._mod_progress_end / 100))
 
     # -- shared steps --
     def _download_mod_zip(self, tmp_zip, progress_start, progress_end):
         self.log.emit(f"Downloading mod from:\n  {self.mod_url}")
-        net.download_file(self.mod_url, tmp_zip, on_progress=self.progress.emit,
+        net.download_file(self.mod_url, tmp_zip, on_progress=self._report_progress,
                           progress_start=progress_start, progress_end=progress_end,
                           on_log=self.log.emit)
         self.log.emit("Download complete.")
@@ -55,15 +64,32 @@ class InstallWorker(QObject):
         self.log.emit(f"Installing mod files to:\n  {self.install_path}")
         return archive.extract_and_copy(
             tmp_zip, self.install_path,
-            on_log=self.log.emit, on_progress=self.progress.emit,
+            on_log=self.log.emit, on_progress=self._report_progress,
             progress_start=progress_start, progress_end=progress_end,
         )
 
     def _finalize(self, installed, message):
-        self.progress.emit(100)
+        self._report_progress(100)
         metadata.write_metadata(self.install_path, self.mod_version, installed)
-        self.log.emit("Installation complete.")
+        self.log.emit("Mod installation complete.")
+        if self.install_bettercrewlink:
+            message += self._install_bettercrewlink()
+        self.progress.emit(100)
         self.finished.emit(True, message)
+
+    def _install_bettercrewlink(self):
+        """Install BetterCrewLink (60–100%). Returns text to append to the
+        result message. A failure here doesn't fail the (already done) mod install."""
+        try:
+            version = bettercrewlink.download_and_install(
+                on_log=self.log.emit, on_progress=self.progress.emit,
+                progress_start=self._mod_progress_end, progress_end=100,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.log.emit(f"BetterCrewLink installation failed: {e}")
+            return f"\n\nBetterCrewLink could not be installed:\n{e}"
+        self.log.emit(f"BetterCrewLink v{version} installed.")
+        return f"\n\nBetterCrewLink v{version} was also installed."
 
     # -- entry point --
     def run(self):
@@ -97,7 +123,7 @@ class InstallWorker(QObject):
             self.log.emit(f"Removing existing '{dest.name}' folder…")
             shutil.rmtree(dest)
         self._copy_among_us_folder(dest)
-        self.progress.emit(30)
+        self._report_progress(30)
         self.log.emit("Among Us folder copied.")
 
         # Step 2: Download and unzip EpicGamesStarter.exe (30–40%)
@@ -105,7 +131,7 @@ class InstallWorker(QObject):
         with _temp_zip() as starter_zip:
             net.download_file(self.starter_url, starter_zip, on_log=self.log.emit)
             archive.extract_single_exe(starter_zip, dest, "EpicGamesStarter.exe")
-        self.progress.emit(40)
+        self._report_progress(40)
         self.log.emit("EpicGamesStarter.exe downloaded.")
 
         # Steps 3 & 4: Download (40–75%) then extract mod files (75–100%)
@@ -128,6 +154,6 @@ class InstallWorker(QObject):
         def _copy_fn(src, dst):
             shutil.copy2(src, dst)
             copied[0] += 1
-            self.progress.emit(min(int(copied[0] * 30 / total_files), 30))
+            self._report_progress(min(int(copied[0] * 30 / total_files), 30))
 
         shutil.copytree(self.source_path, str(dest), copy_function=_copy_fn)

@@ -20,6 +20,15 @@ EPIC_STARTER_URL = (
     "1.1.0/EpicGamesStarter.exe.zip"
 )
 
+# --- BetterCrewLink (optional proximity voice chat add-on) -------------------
+BETTERCREWLINK_NAME = "BetterCrewLink"
+BETTERCREWLINK_REPO_URL = "https://github.com/OhMyGuus/BetterCrewLink"
+BETTERCREWLINK_RELEASES_API_URL = (
+    "https://api.github.com/repos/OhMyGuus/BetterCrewLink/releases/latest"
+)
+# Prefix of the DisplayName its NSIS setup writes to the Uninstall registry key.
+BETTERCREWLINK_DISPLAY_NAME = "Better-CrewLink"
+
 # --- Installer self-update ---------------------------------------------------
 # Single source of truth for the installer's version. Must match the GitHub
 # release tag (``v<APP_VERSION>``) or users will be prompted to update forever.

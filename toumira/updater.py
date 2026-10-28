@@ -9,7 +9,6 @@ then deletes the old exe once its file lock is released.
 Only meaningful for the frozen (PyInstaller) build — running from source never
 checks for updates.
 """
-import hashlib
 import json
 import os
 import subprocess
@@ -75,18 +74,6 @@ class UpdateCheckWorker(QObject):
 
 
 # --- Downloading -------------------------------------------------------------
-def _verify_digest(path, digest):
-    """Raise if ``path`` does not match a ``"sha256:<hex>"`` digest (if given)."""
-    if not digest.startswith("sha256:"):
-        return
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    if h.hexdigest() != digest.split(":", 1)[1].lower():
-        raise RuntimeError("Downloaded update failed its integrity check (SHA-256 mismatch).")
-
-
 def download_update(info, on_progress=None):
     """Download the new exe next to the running one. Returns its path.
 
@@ -100,7 +87,7 @@ def download_update(info, on_progress=None):
     try:
         net.download_file(info["exe_url"], part, on_progress=on_progress,
                           allow_insecure=False, timeout=60)
-        _verify_digest(part, info["digest"])
+        net.verify_sha256_digest(part, info["digest"])
         if _same_path(target, current):
             # Same filename: a running exe can't be overwritten, but it can be renamed.
             current.replace(current.with_name(current.name + _OLD_SUFFIX))

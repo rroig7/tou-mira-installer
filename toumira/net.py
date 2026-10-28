@@ -9,6 +9,7 @@ authenticity, so it is a last resort and is surfaced to the caller via
 installer self-update, which executes what it downloads) pass
 ``allow_insecure=False``.
 """
+import hashlib
 import ssl
 import urllib.error
 import urllib.request
@@ -128,3 +129,18 @@ def download_file(url, dest, on_progress=None, progress_start=0, progress_end=10
             on_progress(progress_end)
 
     _run_with_fallback(_do, on_log, allow_insecure)
+
+
+def verify_sha256_digest(path, digest):
+    """Raise if ``path`` does not match a GitHub ``"sha256:<hex>"`` asset digest.
+
+    Does nothing when ``digest`` is empty or not SHA-256 (older releases have none).
+    """
+    if not digest.startswith("sha256:"):
+        return
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    if h.hexdigest() != digest.split(":", 1)[1].lower():
+        raise RuntimeError("Downloaded file failed its integrity check (SHA-256 mismatch).")
