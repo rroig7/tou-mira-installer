@@ -86,15 +86,17 @@ def installed_version(source=OFFICIAL):
     return None
 
 
-def fetch_latest_setup(on_log=None, source=OFFICIAL):
-    """Return ``{version, name, url, digest}`` for the newest Windows setup exe.
-
-    Uses verified TLS only, since the result is executed.
-    """
+def fetch_releases(source=OFFICIAL, on_log=None):
+    """Return the source's releases, newest first (a /releases/latest answer becomes a
+    one-item list). Uses verified TLS only, since the setup is executed."""
     with net.open_url(source.releases_api_url, timeout=10,
                       on_log=on_log, allow_insecure=False) as resp:
         data = json.loads(resp.read().decode())
-    releases = data if isinstance(data, list) else [data]
+    return data if isinstance(data, list) else [data]
+
+
+def latest_setup(releases, source=OFFICIAL):
+    """Return ``{version, name, url, digest}`` for the newest Windows setup exe."""
     for release in releases:
         if release.get("draft"):
             continue
@@ -111,14 +113,20 @@ def fetch_latest_setup(on_log=None, source=OFFICIAL):
     raise RuntimeError(f"No {source.name} release has a Windows setup download.")
 
 
+def fetch_latest_setup(on_log=None, source=OFFICIAL):
+    """Return ``{version, name, url, digest}`` for the newest Windows setup exe."""
+    return latest_setup(fetch_releases(source, on_log), source)
+
+
 def download_and_install(on_log=None, on_progress=None, progress_start=0, progress_end=100,
-                         source=OFFICIAL):
+                         source=OFFICIAL, releases=None):
     """Download the newest setup and run it silently.
 
+    ``releases`` (from :func:`fetch_releases`) saves a request when the caller has them.
     The download takes ``progress_start``–95% of the slice; the silent setup
     run (which reports no progress) takes the rest. Returns the version installed.
     """
-    info = fetch_latest_setup(on_log, source)
+    info = latest_setup(releases if releases is not None else fetch_releases(source, on_log), source)
     if on_log:
         on_log(f"Downloading {info['name']} ({source.name} v{info['version']})…")
     download_end = progress_start + int((progress_end - progress_start) * 0.95)

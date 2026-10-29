@@ -86,23 +86,20 @@ class InstallWorker(QObject):
         self.finished.emit(True, message)
 
     def _install_bridge(self, installed):
-        """Install the voice bridge DLL into the mod's plugins folder, adding it
-        to ``installed``. Returns text to append to the result message. It's a
-        ~30 KB file, so it gets no progress slice. A failure here doesn't fail
-        the mod install."""
+        """Install the voice bridge built for this TOU-Mira version into the mod's
+        plugins folder, adding it to ``installed``. Returns text to append to the
+        result message. It's a ~30 KB file, so it gets no progress slice. A failure
+        here doesn't fail the mod install."""
         try:
-            version, entry, warning = bridge.download_and_install(
+            version, entry = bridge.download_and_install(
                 self.install_path, self.mod_version, on_log=self.log.emit,
             )
         except Exception as e:  # noqa: BLE001
             self.log.emit(f"Voice bridge installation failed: {e}")
             return f"\n\nThe TOU-Mira voice bridge could not be installed:\n{e}"
         installed.append(entry)
-        self.log.emit(f"Voice bridge v{version} installed.")
-        if warning:
-            self.log.emit(warning)
-            return f"\n\nVoice bridge v{version} was also installed.\n{warning}"
-        return f"\n\nVoice bridge v{version} was also installed."
+        self.log.emit(f"Voice bridge for TOU-Mira {self.mod_version} installed (from v{version}).")
+        return f"\n\nThe voice bridge for TOU-Mira {self.mod_version} was also installed."
 
     def _install_bettercrewlink(self, source):
         """Install a BetterCrewLink build (60–100%). Returns text to append to the

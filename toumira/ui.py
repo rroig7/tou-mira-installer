@@ -27,7 +27,7 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from toumira import bettercrewlink, bridge, metadata, updater
+from toumira import bettercrewlink, bridge, metadata, updater, voice_update
 from toumira.config import (
     AMONG_US_EXE,
     APP_RELEASES_PAGE_URL,
@@ -89,6 +89,10 @@ class MainWindow(QMainWindow):
         self._app_update_thread = None
         self._app_update_worker = None
         self._app_update_dialog = None
+        self._voice_update = None  # voice_update.check() result offered in the banner
+        self._voice_check_thread = None
+        self._voice_check_worker = None
+        self._voice_check_again = False
 
         self._build_ui()
 
@@ -118,6 +122,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(subtitle)
 
         layout.addWidget(self._build_update_banner())
+        layout.addWidget(self._build_voice_update_banner())
         layout.addWidget(self._build_platform_box())
         layout.addWidget(self._build_steam_widget())
         layout.addWidget(self._build_epic_widget())
@@ -154,6 +159,25 @@ class MainWindow(QMainWindow):
         row.addWidget(self.update_label, 1)
         self.update_banner.setVisible(False)
         return self.update_banner
+
+    def _build_voice_update_banner(self):
+        """Banner offering BetterCrewLink-TOU / voice bridge updates, hidden until one is found."""
+        self.voice_update_banner = QFrame()
+        self.voice_update_banner.setStyleSheet(
+            "QFrame { background-color: #E3F2FD; border: 1px solid #64B5F6; "
+            "border-radius: 4px; padding: 4px; } "
+            "QLabel { color: #1a1a1a; background: transparent; border: none; }"
+        )
+        row = QHBoxLayout(self.voice_update_banner)
+        row.setContentsMargins(8, 4, 8, 4)
+        self.voice_update_label = QLabel()
+        self.voice_update_label.setWordWrap(True)
+        row.addWidget(self.voice_update_label, 1)
+        self.voice_update_btn = QPushButton("Update voice chat")
+        self.voice_update_btn.clicked.connect(self._start_voice_update)
+        row.addWidget(self.voice_update_btn)
+        self.voice_update_banner.setVisible(False)
+        return self.voice_update_banner
 
     def _build_platform_box(self):
         platform_box = QGroupBox("Platform")
@@ -385,6 +409,7 @@ class MainWindow(QMainWindow):
             if self._is_mod_installed():
                 self.log(f"TOU-Mira is up to date (v{installed}).")
         self._update_button_states()
+        self._check_voice_update()
 
     def _is_mod_installed(self):
         if not self.install_path:
@@ -802,17 +827,74 @@ class MainWindow(QMainWindow):
         )
 
     def _launch_worker(self, **kwargs):
+        self._run_install_worker(InstallWorker(
+            install_bettercrewlink=self.bcl_checkbox.isChecked(),
+            install_tou_voice=self.tou_checkbox.isChecked(),
+            **kwargs,
+        ))
+
+    # -- BetterCrewLink-TOU / voice bridge updates --
+    def _check_voice_update(self):
+        """Look for BetterCrewLink-TOU / voice bridge updates for the selected install
+        in the background; the result shows or hides the voice update banner."""
+        if self._voice_check_thread is not None:
+            self._voice_check_again = True  # re-run once the current check finishes
+            return
+        if self._installing or not self._is_mod_installed():
+            self._show_voice_update(None)
+            return
+        worker = voice_update.VoiceUpdateCheckWorker(
+            self.install_path, metadata.read_version(self.install_path),
+        )
+        worker.result.connect(self._show_voice_update)
+        worker.error.connect(
+            lambda msg: self.log(f"Could not check for voice chat updates: {msg}")
+        )
+        self._voice_check_worker = worker
+        self._voice_check_thread = self._run_in_thread(worker, (worker.result, worker.error))
+        # Drop our references only once the thread has stopped: a QThread garbage-collected
+        # while still running aborts the whole app.
+        self._voice_check_thread.finished.connect(self._on_voice_check_done)
+
+    def _on_voice_check_done(self):
+        self._voice_check_thread = self._voice_check_worker = None
+        if self._voice_check_again:
+            self._voice_check_again = False
+            self._check_voice_update()
+
+    def _show_voice_update(self, info):
+        parts = []
+        if info and info.get("app"):
+            parts.append(f"{BCL_TOU_NAME} v{info['app']}")
+        if info and info.get("bridge"):
+            parts.append(f"the voice bridge for TOU-Mira {metadata.read_version(self.install_path)}")
+        self._voice_update = info if parts else None
+        self.voice_update_banner.setVisible(bool(parts))
+        if parts:
+            self.voice_update_label.setText(
+                "<b>Voice chat update available:</b> " + " and ".join(parts) + "."
+            )
+            self.log("Voice chat update available: " + ", ".join(parts))
+
+    def _start_voice_update(self):
+        info = self._voice_update
+        if not info or self._installing:
+            return
+        self._run_install_worker(voice_update.VoiceUpdateWorker(
+            self.install_path, metadata.read_version(self.install_path),
+            update_app=bool(info.get("app")), update_bridge=bool(info.get("bridge")),
+        ))
+
+    def _run_install_worker(self, worker):
+        """Run an install-style worker (``progress``/``log``/``finished`` signals),
+        locking the controls until ``on_install_finished``."""
         self._installing = True
         self._set_controls_enabled(False)
         self.install_btn.setText("Installing…")
         self.progress.setValue(0)
 
         self.thread = QThread()
-        self.worker = InstallWorker(
-            install_bettercrewlink=self.bcl_checkbox.isChecked(),
-            install_tou_voice=self.tou_checkbox.isChecked(),
-            **kwargs,
-        )
+        self.worker = worker
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.progress.setValue)
@@ -835,6 +917,7 @@ class MainWindow(QMainWindow):
         self.btn_epic.setEnabled(enabled)
         self.bcl_checkbox.setEnabled(enabled)
         self.tou_checkbox.setEnabled(enabled)
+        self.voice_update_btn.setEnabled(enabled)
 
     def on_install_finished(self, success, message):
         self._installing = False

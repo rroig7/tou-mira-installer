@@ -29,6 +29,14 @@ def read_version(install_path):
         return "0"
 
 
+def add_manifest_entry(install_path, entry):
+    """Append ``entry`` to an existing manifest. No-op without one, or if already listed."""
+    entries = read_manifest(install_path)
+    if entries is None or entry in entries:
+        return
+    _write_text_safe(Path(install_path) / MANIFEST_FILE, "\n".join(entries + [entry]))
+
+
 def read_manifest(install_path):
     """Return the list of non-empty manifest entries, or None if absent."""
     manifest_path = Path(install_path) / MANIFEST_FILE

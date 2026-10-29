@@ -42,14 +42,14 @@ BCL_TOU_DISPLAY_NAME = "BetterCrewLink-TOU"
 
 BRIDGE_NAME = "TOU-Mira voice bridge"
 BRIDGE_REPO_URL = "https://github.com/rroig7/whg-tou-mira"
-# The full list, not /releases/latest: the bridge ships as prereleases while in alpha.
-BRIDGE_RELEASES_API_URL = "https://api.github.com/repos/rroig7/whg-tou-mira/releases"
+# Installed name. BetterCrewLink-TOU releases attach one build per supported TOU-Mira
+# release as TouMiraBclBridge-<tou-mira-tag>.dll; see bridge.py.
 BRIDGE_DLL_NAME = "TouMiraBclBridge.dll"
 
 # --- Installer self-update ---------------------------------------------------
 # Single source of truth for the installer's version. Must match the GitHub
 # release tag (``v<APP_VERSION>``) or users will be prompted to update forever.
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.4.0"
 APP_RELEASES_API_URL = (
     "https://api.github.com/repos/rroig7/tou-mira-installer/releases/latest"
 )

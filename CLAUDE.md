@@ -46,14 +46,19 @@ official BetterCrewLink. It installs two things:
 * **BetterCrewLink-TOU**, the `rroig7/BetterCrewLink` fork, as a separate app. It has its own
   install folder (`Programs\bettercrewlink-tou`), settings and Uninstall entry (`DisplayName`
   `BetterCrewLink-TOU …`).
-* **`TouMiraBclBridge.dll`**, a BepInEx plugin from `rroig7/whg-tou-mira`, which lets that build
-  mute jailed, blackmailed and controlled players. Official BetterCrewLink ignores it.
+* **The voice bridge**, a BepInEx plugin that lets that build mute jailed, blackmailed and
+  controlled players. Official BetterCrewLink ignores it. Each BetterCrewLink-TOU release
+  attaches one build per supported TOU-Mira release, `TouMiraBclBridge-<tou-mira-tag>.dll`,
+  compiled against that release. This is how releases are tied to TOU-Mira versions.
+  `bridge.find_for` picks the newest one matching the TOU-Mira version being installed, and it's
+  saved as `BepInEx\plugins\TouMiraBclBridge.dll`. An unsupported TOU-Mira version means no
+  bridge, reported in the result message.
 
 The two checkboxes are mutually exclusive: ticking one unticks the other, and neither is fine. If
 both reach the worker, TOU wins. `bettercrewlink.py` serves both builds through a `Source`
 (`OFFICIAL` / `TOU`): the same download, digest check and `/S` run, and the same 60–100% progress
-slice. TOU's releases, and the bridge's, are read from `/releases` (not `/releases/latest`)
-because alpha builds are prereleases. The newest non-draft release with a matching asset wins. If
+slice. TOU releases are read from `/releases` (not `/releases/latest`) because alpha builds are
+prereleases. The newest non-draft release with a matching asset wins. If
 official BetterCrewLink is already installed, the result message suggests uninstalling it. We
 still never uninstall anything ourselves.
 
@@ -61,10 +66,26 @@ still never uninstall anything ourselves.
 `BepInEx\plugins\TouMiraBclBridge.dll` to the manifest so the normal uninstall removes it. It's
 downloaded with verified TLS only plus the SHA-256 `digest` check (the game loads it), to a `.part`
 file that is then `os.replace`d. It's ~30 KB, so it gets no progress slice. As with BetterCrewLink,
-a failure doesn't fail the install. The release notes' `Built for TOU-Mira: <tag>[, <tag>…]` line
-lists the supported mod versions; installing an unlisted one still installs the bridge but appends
-a warning. That release contract is documented in whg-tou-mira's README; keep both sides in sync.
-"Installed" = the DLL exists in the selected folder's `BepInEx/plugins`.
+a failure doesn't fail the install. The asset naming contract is documented, and produced by
+`scripts/release-bcl-tou.sh`, in whg-tou-mira; keep both sides in sync. "Installed" = the DLL
+exists in the selected folder's `BepInEx/plugins`.
+
+**Voice chat updates (`voice_update.py`).** Whenever `_refresh_update_state` runs (startup after
+releases load, platform change, after any install), `VoiceUpdateCheckWorker` calls
+`voice_update.check`. If the app or the bridge is installed, it reports what to install:
+
+* a newer app (`version_utils.semver_gt`, which handles `-alpha.N`);
+* a bridge whose SHA-256 differs from the GitHub `digest` of the newest build for the installed
+  TOU-Mira version (`toumira_version.txt`);
+* or the missing half of the pair.
+
+A blue banner then offers **Update voice chat**, which runs `VoiceUpdateWorker`. That worker has
+the same signals as `InstallWorker` and goes through `_run_install_worker`/`on_install_finished`.
+It updates the bridge (appending it to the manifest via `metadata.add_manifest_entry`) and/or the
+app, without touching the mod. Checks never overlap; a request during a check re-runs it
+afterwards. Keep the QThread referenced until its `finished` signal: dropping a running QThread
+aborts the app. The app also self-updates via electron-updater, but the bridge only updates
+through here.
 
 ### Install metadata
 After a successful install, `metadata.write_metadata` writes two files into the install folder: `toumira_version.txt` (used for the "Update available" banner via `version_utils.version_gt`, a numeric dotted-tuple compare) and `toumira_files.txt` (manifest of every path written, relative to the install root). Steam uninstall uses the manifest to delete only mod files, then removes leftover `BepInEx/` (runtime logs/config aren't in the manifest); with no manifest it falls back to deleting `BepInEx/`.
