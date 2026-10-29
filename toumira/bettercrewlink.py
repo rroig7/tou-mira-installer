@@ -1,26 +1,51 @@
 """Optional BetterCrewLink (proximity voice chat) install, decoupled from the GUI.
 
-BetterCrewLink is a standalone app, not a mod file: we download its official
-Windows setup from the latest GitHub release and run it silently. Its NSIS
-installer is per-user (no admin prompt) and registers itself under the
-Uninstall registry key, which is how we detect an existing install. Uninstall
-is left to Windows "Installed apps" — we never remove it.
+BetterCrewLink is a standalone app, not a mod file: we download its Windows
+setup from GitHub releases and run it silently. Its NSIS installer is per-user
+(no admin prompt) and registers itself under the Uninstall registry key, which
+is how we detect an existing install. Uninstall is left to Windows "Installed
+apps" — we never remove it.
+
+Two builds share this code (see ``OFFICIAL`` / ``TOU``): official BetterCrewLink,
+and the BetterCrewLink-TOU fork, which installs as a separate app.
 """
 import json
 import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 
 from toumira import net
-from toumira.config import BETTERCREWLINK_DISPLAY_NAME, BETTERCREWLINK_RELEASES_API_URL
+from toumira.config import (
+    BCL_TOU_DISPLAY_NAME,
+    BCL_TOU_NAME,
+    BCL_TOU_RELEASES_API_URL,
+    BETTERCREWLINK_DISPLAY_NAME,
+    BETTERCREWLINK_NAME,
+    BETTERCREWLINK_RELEASES_API_URL,
+)
 
 _SETUP_TIMEOUT = 10 * 60  # seconds
 
 
-def installed_version():
-    """Return the installed BetterCrewLink version string, or None if not installed."""
+@dataclass(frozen=True)
+class Source:
+    name: str
+    # Either /releases/latest (one release object) or /releases (newest-first list,
+    # prereleases included).
+    releases_api_url: str
+    # Prefix of the DisplayName its NSIS setup writes to the Uninstall registry key.
+    display_name: str
+
+
+OFFICIAL = Source(BETTERCREWLINK_NAME, BETTERCREWLINK_RELEASES_API_URL, BETTERCREWLINK_DISPLAY_NAME)
+TOU = Source(BCL_TOU_NAME, BCL_TOU_RELEASES_API_URL, BCL_TOU_DISPLAY_NAME)
+
+
+def installed_version(source=OFFICIAL):
+    """Return the installed version string, or None if not installed."""
     if sys.platform != "win32":
         return None
     try:
@@ -50,7 +75,7 @@ def installed_version():
                 try:
                     with winreg.OpenKey(root, name) as key:
                         display = winreg.QueryValueEx(key, "DisplayName")[0]
-                        if not str(display).startswith(BETTERCREWLINK_DISPLAY_NAME):
+                        if not str(display).startswith(source.display_name):
                             continue
                         try:
                             return str(winreg.QueryValueEx(key, "DisplayVersion")[0])
@@ -61,36 +86,41 @@ def installed_version():
     return None
 
 
-def fetch_latest_setup(on_log=None):
-    """Return ``{version, name, url, digest}`` for the latest Windows setup exe.
+def fetch_latest_setup(on_log=None, source=OFFICIAL):
+    """Return ``{version, name, url, digest}`` for the newest Windows setup exe.
 
     Uses verified TLS only, since the result is executed.
     """
-    with net.open_url(BETTERCREWLINK_RELEASES_API_URL, timeout=10,
+    with net.open_url(source.releases_api_url, timeout=10,
                       on_log=on_log, allow_insecure=False) as resp:
-        release = json.loads(resp.read().decode())
-    for asset in release.get("assets", []):
-        name = asset.get("name", "")
-        lower = name.lower()
-        if lower.endswith(".exe") and "setup" in lower:
-            return {
-                "version": release.get("tag_name", "").lstrip("vV"),
-                "name": name,
-                "url": asset.get("browser_download_url", ""),
-                "digest": asset.get("digest") or "",
-            }
-    raise RuntimeError("The latest BetterCrewLink release has no Windows setup download.")
+        data = json.loads(resp.read().decode())
+    releases = data if isinstance(data, list) else [data]
+    for release in releases:
+        if release.get("draft"):
+            continue
+        for asset in release.get("assets", []):
+            name = asset.get("name", "")
+            lower = name.lower()
+            if lower.endswith(".exe") and "setup" in lower:
+                return {
+                    "version": release.get("tag_name", "").lstrip("vV"),
+                    "name": name,
+                    "url": asset.get("browser_download_url", ""),
+                    "digest": asset.get("digest") or "",
+                }
+    raise RuntimeError(f"No {source.name} release has a Windows setup download.")
 
 
-def download_and_install(on_log=None, on_progress=None, progress_start=0, progress_end=100):
-    """Download the latest BetterCrewLink setup and run it silently.
+def download_and_install(on_log=None, on_progress=None, progress_start=0, progress_end=100,
+                         source=OFFICIAL):
+    """Download the newest setup and run it silently.
 
     The download takes ``progress_start``–95% of the slice; the silent setup
     run (which reports no progress) takes the rest. Returns the version installed.
     """
-    info = fetch_latest_setup(on_log)
+    info = fetch_latest_setup(on_log, source)
     if on_log:
-        on_log(f"Downloading {info['name']} (BetterCrewLink v{info['version']})…")
+        on_log(f"Downloading {info['name']} ({source.name} v{info['version']})…")
     download_end = progress_start + int((progress_end - progress_start) * 0.95)
     tmp_dir = tempfile.mkdtemp(prefix="toumira_bcl_")
     try:
@@ -101,10 +131,10 @@ def download_and_install(on_log=None, on_progress=None, progress_start=0, progre
                           on_log=on_log, timeout=60, allow_insecure=False)
         net.verify_sha256_digest(setup, info["digest"])
         if on_log:
-            on_log("Running BetterCrewLink setup…")
+            on_log(f"Running {source.name} setup…")
         result = subprocess.run([str(setup), "/S"], timeout=_SETUP_TIMEOUT)
         if result.returncode != 0:
-            raise RuntimeError(f"BetterCrewLink setup exited with code {result.returncode}.")
+            raise RuntimeError(f"{source.name} setup exited with code {result.returncode}.")
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
     if on_progress:

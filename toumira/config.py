@@ -29,6 +29,23 @@ BETTERCREWLINK_RELEASES_API_URL = (
 # Prefix of the DisplayName its NSIS setup writes to the Uninstall registry key.
 BETTERCREWLINK_DISPLAY_NAME = "Better-CrewLink"
 
+# --- BetterCrewLink-TOU + TOU-Mira voice bridge (optional, alpha) -------------
+# BetterCrewLink-TOU is a BetterCrewLink fork that, with the voice bridge BepInEx
+# plugin, applies TOU-Mira role effects to voice (jailed, blackmailed and
+# controlled players muted, ...). Official BetterCrewLink ignores the bridge, so
+# the two are installed together, instead of official BetterCrewLink.
+BCL_TOU_NAME = "BetterCrewLink-TOU"
+# The full list, not /releases/latest: alpha builds are prereleases, which it skips.
+BCL_TOU_RELEASES_API_URL = "https://api.github.com/repos/rroig7/BetterCrewLink/releases"
+# DisplayName prefix in the Uninstall key; doesn't collide with "Better-CrewLink".
+BCL_TOU_DISPLAY_NAME = "BetterCrewLink-TOU"
+
+BRIDGE_NAME = "TOU-Mira voice bridge"
+BRIDGE_REPO_URL = "https://github.com/rroig7/whg-tou-mira"
+# The full list, not /releases/latest: the bridge ships as prereleases while in alpha.
+BRIDGE_RELEASES_API_URL = "https://api.github.com/repos/rroig7/whg-tou-mira/releases"
+BRIDGE_DLL_NAME = "TouMiraBclBridge.dll"
+
 # --- Installer self-update ---------------------------------------------------
 # Single source of truth for the installer's version. Must match the GitHub
 # release tag (``v<APP_VERSION>``) or users will be prompted to update forever.

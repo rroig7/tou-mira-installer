@@ -39,6 +39,33 @@ Progress is a single 0–100 bar shared across phases; helpers take `progress_st
 ### Optional BetterCrewLink add-on (`bettercrewlink.py`)
 A checkbox in the UI adds BetterCrewLink (https://github.com/OhMyGuus/BetterCrewLink, a standalone Electron app — not mod files) to either flow. After the mod is installed and its metadata written, `InstallWorker` fetches BetterCrewLink's `/releases/latest`, downloads the `*Setup*.exe` asset to a fresh temp dir (verified TLS only + SHA-256 `digest` check via `net.verify_sha256_digest`, since it's executed) and runs it with `/S` (silent, per-user NSIS, no UAC). When enabled the mod phases are scaled into 0–60 of the bar via `InstallWorker._report_progress` and BetterCrewLink takes 60–100. A BetterCrewLink failure doesn't fail the install; it's appended to the success message. Installed state/version is read from the `Uninstall` registry key (`DisplayName` starting `Better-CrewLink`). The installer never uninstalls it.
 
+### Optional BetterCrewLink-TOU + voice bridge (alpha; `bridge.py`, `bettercrewlink.TOU`)
+A second checkbox (`tou_checkbox`, worker flag `install_tou_voice`) is the *alternative* to
+official BetterCrewLink. It installs two things:
+
+* **BetterCrewLink-TOU**, the `rroig7/BetterCrewLink` fork, as a separate app. It has its own
+  install folder (`Programs\bettercrewlink-tou`), settings and Uninstall entry (`DisplayName`
+  `BetterCrewLink-TOU …`).
+* **`TouMiraBclBridge.dll`**, a BepInEx plugin from `rroig7/whg-tou-mira`, which lets that build
+  mute jailed, blackmailed and controlled players. Official BetterCrewLink ignores it.
+
+The two checkboxes are mutually exclusive: ticking one unticks the other, and neither is fine. If
+both reach the worker, TOU wins. `bettercrewlink.py` serves both builds through a `Source`
+(`OFFICIAL` / `TOU`): the same download, digest check and `/S` run, and the same 60–100% progress
+slice. TOU's releases, and the bridge's, are read from `/releases` (not `/releases/latest`)
+because alpha builds are prereleases. The newest non-draft release with a matching asset wins. If
+official BetterCrewLink is already installed, the result message suggests uninstalling it. We
+still never uninstall anything ourselves.
+
+`InstallWorker._finalize` installs the bridge after the mod files and *before* `write_metadata`, appending
+`BepInEx\plugins\TouMiraBclBridge.dll` to the manifest so the normal uninstall removes it. It's
+downloaded with verified TLS only plus the SHA-256 `digest` check (the game loads it), to a `.part`
+file that is then `os.replace`d. It's ~30 KB, so it gets no progress slice. As with BetterCrewLink,
+a failure doesn't fail the install. The release notes' `Built for TOU-Mira: <tag>[, <tag>…]` line
+lists the supported mod versions; installing an unlisted one still installs the bridge but appends
+a warning. That release contract is documented in whg-tou-mira's README; keep both sides in sync.
+"Installed" = the DLL exists in the selected folder's `BepInEx/plugins`.
+
 ### Install metadata
 After a successful install, `metadata.write_metadata` writes two files into the install folder: `toumira_version.txt` (used for the "Update available" banner via `version_utils.version_gt`, a numeric dotted-tuple compare) and `toumira_files.txt` (manifest of every path written, relative to the install root). Steam uninstall uses the manifest to delete only mod files, then removes leftover `BepInEx/` (runtime logs/config aren't in the manifest); with no manifest it falls back to deleting `BepInEx/`.
 

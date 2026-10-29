@@ -7,7 +7,7 @@ from pathlib import Path
 
 from qtpy.QtCore import QObject, Signal
 
-from toumira import archive, bettercrewlink, metadata, net
+from toumira import archive, bettercrewlink, bridge, metadata, net
 from toumira.config import PLATFORM_EPIC
 
 
@@ -35,7 +35,7 @@ class InstallWorker(QObject):
 
     def __init__(self, platform, install_path, mod_url,
                  source_path=None, starter_url=None, mod_version=None,
-                 install_bettercrewlink=False):
+                 install_bettercrewlink=False, install_tou_voice=False):
         super().__init__()
         self.platform = platform
         self.install_path = install_path
@@ -43,10 +43,13 @@ class InstallWorker(QObject):
         self.source_path = source_path  # Epic only: original Among Us folder
         self.starter_url = starter_url  # Epic only
         self.mod_version = mod_version or ""
-        self.install_bettercrewlink = install_bettercrewlink
-        # Mod phases are written against a 0–100 bar; when BetterCrewLink is
+        # Official BetterCrewLink, or BetterCrewLink-TOU + the voice bridge (alpha).
+        # The UI makes them mutually exclusive; TOU wins if both are passed.
+        self.install_tou_voice = install_tou_voice
+        self.install_bettercrewlink = install_bettercrewlink and not install_tou_voice
+        # Mod phases are written against a 0–100 bar; when a BetterCrewLink is
         # also installed they are squeezed into 0–60 and it takes 60–100.
-        self._mod_progress_end = 60 if install_bettercrewlink else 100
+        self._mod_progress_end = 60 if (self.install_bettercrewlink or install_tou_voice) else 100
 
     def _report_progress(self, pct):
         """Emit a mod-phase percentage, scaled into the mod's share of the bar."""
@@ -70,26 +73,59 @@ class InstallWorker(QObject):
 
     def _finalize(self, installed, message):
         self._report_progress(100)
+        if self.install_tou_voice:
+            # Before write_metadata so the DLL lands in the uninstall manifest.
+            message += self._install_bridge(installed)
         metadata.write_metadata(self.install_path, self.mod_version, installed)
         self.log.emit("Mod installation complete.")
-        if self.install_bettercrewlink:
-            message += self._install_bettercrewlink()
+        if self.install_tou_voice:
+            message += self._install_bettercrewlink(bettercrewlink.TOU)
+        elif self.install_bettercrewlink:
+            message += self._install_bettercrewlink(bettercrewlink.OFFICIAL)
         self.progress.emit(100)
         self.finished.emit(True, message)
 
-    def _install_bettercrewlink(self):
-        """Install BetterCrewLink (60–100%). Returns text to append to the
+    def _install_bridge(self, installed):
+        """Install the voice bridge DLL into the mod's plugins folder, adding it
+        to ``installed``. Returns text to append to the result message. It's a
+        ~30 KB file, so it gets no progress slice. A failure here doesn't fail
+        the mod install."""
+        try:
+            version, entry, warning = bridge.download_and_install(
+                self.install_path, self.mod_version, on_log=self.log.emit,
+            )
+        except Exception as e:  # noqa: BLE001
+            self.log.emit(f"Voice bridge installation failed: {e}")
+            return f"\n\nThe TOU-Mira voice bridge could not be installed:\n{e}"
+        installed.append(entry)
+        self.log.emit(f"Voice bridge v{version} installed.")
+        if warning:
+            self.log.emit(warning)
+            return f"\n\nVoice bridge v{version} was also installed.\n{warning}"
+        return f"\n\nVoice bridge v{version} was also installed."
+
+    def _install_bettercrewlink(self, source):
+        """Install a BetterCrewLink build (60–100%). Returns text to append to the
         result message. A failure here doesn't fail the (already done) mod install."""
         try:
             version = bettercrewlink.download_and_install(
                 on_log=self.log.emit, on_progress=self.progress.emit,
                 progress_start=self._mod_progress_end, progress_end=100,
+                source=source,
             )
         except Exception as e:  # noqa: BLE001
-            self.log.emit(f"BetterCrewLink installation failed: {e}")
-            return f"\n\nBetterCrewLink could not be installed:\n{e}"
-        self.log.emit(f"BetterCrewLink v{version} installed.")
-        return f"\n\nBetterCrewLink v{version} was also installed."
+            self.log.emit(f"{source.name} installation failed: {e}")
+            return f"\n\n{source.name} could not be installed:\n{e}"
+        self.log.emit(f"{source.name} v{version} installed.")
+        message = f"\n\n{source.name} v{version} was also installed."
+        official = bettercrewlink.OFFICIAL
+        if source is bettercrewlink.TOU and bettercrewlink.installed_version(official) is not None:
+            # The installer never uninstalls BetterCrewLink; just steer away from running both.
+            message += (
+                f"\nOfficial {official.name} is also installed. Uninstall it from "
+                "Windows Settings → Apps so you don't run both."
+            )
+        return message
 
     # -- entry point --
     def run(self):

@@ -27,14 +27,17 @@ from qtpy.QtWidgets import (
     QWidget,
 )
 
-from toumira import bettercrewlink, metadata, updater
+from toumira import bettercrewlink, bridge, metadata, updater
 from toumira.config import (
     AMONG_US_EXE,
     APP_RELEASES_PAGE_URL,
     APP_VERSION,
+    BCL_TOU_NAME,
     BEPINEX_FOLDER,
     BETTERCREWLINK_NAME,
     BETTERCREWLINK_REPO_URL,
+    BRIDGE_NAME,
+    BRIDGE_REPO_URL,
     EPIC_INSTALL_FOLDER_NAME,
     EPIC_STARTER_URL,
     MOD_NAME,
@@ -121,6 +124,7 @@ class MainWindow(QMainWindow):
         self._epic_widget.setVisible(False)
         layout.addLayout(self._build_version_row())
         layout.addLayout(self._build_bettercrewlink_row())
+        layout.addLayout(self._build_tou_voice_row())
 
         # Log
         self.log_box = QTextEdit()
@@ -248,6 +252,41 @@ class MainWindow(QMainWindow):
                 f"Installed: v{version}" if version else "Installed"
             )
 
+    def _build_tou_voice_row(self):
+        """BetterCrewLink-TOU + voice bridge: an alternative to official BetterCrewLink."""
+        row = QHBoxLayout()
+        self.tou_checkbox = QCheckBox(f"Or install {BCL_TOU_NAME} + voice bridge (alpha)")
+        self.tou_checkbox.setToolTip(
+            f"{BCL_TOU_NAME} is a BetterCrewLink build that, with the {BRIDGE_NAME}\n"
+            "plugin, mutes jailed, blackmailed and controlled players.\n"
+            "Installed instead of official BetterCrewLink. The bridge goes into\n"
+            "BepInEx/plugins and is removed by Uninstall Mod."
+        )
+        row.addWidget(self.tou_checkbox)
+        link = QLabel(f'<a href="{BRIDGE_REPO_URL}">What is this?</a>')
+        link.setOpenExternalLinks(True)
+        row.addWidget(link)
+        row.addStretch()
+        self.tou_status_label = QLabel()
+        self.tou_status_label.setStyleSheet("color: gray; font-size: 11px;")
+        row.addWidget(self.tou_status_label)
+        self._refresh_tou_voice_status()
+
+        # Either BetterCrewLink or neither, never both: they're separate apps.
+        self.tou_checkbox.toggled.connect(
+            lambda on: on and self.bcl_checkbox.setChecked(False))
+        self.bcl_checkbox.toggled.connect(
+            lambda on: on and self.tou_checkbox.setChecked(False))
+        return row
+
+    def _refresh_tou_voice_status(self):
+        # The bridge part depends on the selected folder, so this is refreshed
+        # with the button states.
+        version = bettercrewlink.installed_version(bettercrewlink.TOU)
+        app = "App: not installed" if version is None else f"App: v{version}" if version else "App: installed"
+        plugin = "bridge installed" if bridge.is_installed(self.install_path) else "bridge not installed"
+        self.tou_status_label.setText(f"{app} · {plugin}")
+
     def _build_button_row(self):
         btn_row = QHBoxLayout()
         self.uninstall_btn = QPushButton("Uninstall Mod")
@@ -357,6 +396,7 @@ class MainWindow(QMainWindow):
     def _update_button_states(self):
         has_releases = bool(self._releases)
         installed = self._is_mod_installed()
+        self._refresh_tou_voice_status()
         self.install_btn.setEnabled(has_releases)
         self.uninstall_btn.setEnabled(installed)
         if self._update_version and installed:
@@ -769,7 +809,9 @@ class MainWindow(QMainWindow):
 
         self.thread = QThread()
         self.worker = InstallWorker(
-            install_bettercrewlink=self.bcl_checkbox.isChecked(), **kwargs
+            install_bettercrewlink=self.bcl_checkbox.isChecked(),
+            install_tou_voice=self.tou_checkbox.isChecked(),
+            **kwargs,
         )
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
@@ -792,6 +834,7 @@ class MainWindow(QMainWindow):
         self.btn_steam.setEnabled(enabled)
         self.btn_epic.setEnabled(enabled)
         self.bcl_checkbox.setEnabled(enabled)
+        self.tou_checkbox.setEnabled(enabled)
 
     def on_install_finished(self, success, message):
         self._installing = False
