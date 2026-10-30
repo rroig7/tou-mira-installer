@@ -27,6 +27,8 @@ There is no test suite, linter, or formatter configured. `test/` is gitignored (
 
 Layering: `ui.py` is the only module that touches widgets/dialogs. Long-running work runs in `QObject` workers moved onto a `QThread` (`releases.ReleaseFetchWorker`, `installer.InstallWorker`, `updater.UpdateCheckWorker`/`UpdateDownloadWorker`) that communicate back only via Qt signals (`progress`, `log`, `finished`/`error`). The pure helper modules (`net`, `archive`, `metadata`, `detection`) have no Qt dependency and report back through optional `on_log` / `on_progress` callbacks, which the workers wire to their signal `.emit` methods. Keep that separation: don't import Qt into the helpers, and don't do I/O-heavy work on the GUI thread.
 
+The **Check for updates** button (`MainWindow._check_for_updates`, next to the version picker) re-runs the startup checks: TOU-Mira releases (whose completion re-runs the voice chat check), BetterCrewLink's registry status, and, in the frozen build only, the installer self-update check. Each background check ignores a new request while it's still running, because replacing a running `QThread`'s only reference aborts the app. A failed refresh keeps the version list already loaded.
+
 Progress is a single 0–100 bar shared across phases; helpers take `progress_start`/`progress_end` so the caller assigns each phase a slice (e.g. Steam: download 0–75, extract 75–100; Epic: copy 0–30, starter 30–40, download 40–75, extract 75–100).
 
 ### Release discovery

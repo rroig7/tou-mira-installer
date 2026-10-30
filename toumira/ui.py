@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         self._fetch_thread = None
         self._fetch_worker = None
         self._installing = False
+        self._controls_enabled = True  # False while an install or installer update runs
         self._pending_app_update = None  # deferred until a running install finishes
         self._app_check_thread = None
         self._app_check_worker = None
@@ -249,6 +250,13 @@ class MainWindow(QMainWindow):
         self.version_combo.setEnabled(False)
         self.version_combo.currentIndexChanged.connect(self._update_button_states)
         version_row.addWidget(self.version_combo, 1)
+        self.refresh_btn = QPushButton("Check for updates")
+        self.refresh_btn.setToolTip(
+            "Check GitHub for new releases of TOU-Mira, the voice chat add-on\n"
+            "and this installer."
+        )
+        self.refresh_btn.clicked.connect(self._check_for_updates)
+        version_row.addWidget(self.refresh_btn)
         return version_row
 
     def _build_bettercrewlink_row(self):
@@ -344,11 +352,26 @@ class MainWindow(QMainWindow):
         self._detect_paths()
 
     # -- release fetching --
+    def _check_for_updates(self):
+        """Refresh button: re-check every repo tied to this installer. The TOU-Mira
+        fetch re-runs the voice chat check when it's done; the installer check only
+        runs in the packaged build."""
+        if self._installing:
+            return
+        self._refresh_bettercrewlink_status()
+        self._fetch_releases()
+        if updater.current_exe():
+            self._check_for_app_update()
+
     def _fetch_releases(self):
-        self.version_combo.clear()
-        self.version_combo.addItem("Loading versions…")
-        self.version_combo.setEnabled(False)
+        if self._fetch_thread is not None:
+            return  # replacing a running QThread's reference would abort the app
+        if not self._releases:
+            self.version_combo.clear()
+            self.version_combo.addItem("Loading versions…")
+            self.version_combo.setEnabled(False)
         self.install_btn.setEnabled(False)
+        self.refresh_btn.setEnabled(False)
         self.log("Fetching available versions from GitHub…")
 
         thread = QThread()
@@ -364,11 +387,16 @@ class MainWindow(QMainWindow):
             sig.connect(thread.quit)
             sig.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
-        thread.finished.connect(lambda: setattr(self, "_fetch_thread", None))
-        thread.finished.connect(lambda: setattr(self, "_fetch_worker", None))
+        thread.finished.connect(self._on_fetch_done)
         thread.start()
 
+    def _on_fetch_done(self):
+        self._fetch_thread = self._fetch_worker = None
+        self._update_button_states()
+        self.refresh_btn.setEnabled(self._controls_enabled)
+
     def _on_releases_fetched(self, releases):
+        previous = self._selected_release()
         self._releases = releases
         self.version_combo.clear()
 
@@ -380,15 +408,25 @@ class MainWindow(QMainWindow):
         for i, release in enumerate(releases):
             label = f"v{release['version']}" + (" (latest)" if i == 0 else "")
             self.version_combo.addItem(label)
+        # Keep the user's pick across a refresh.
+        if previous:
+            for i, release in enumerate(releases):
+                if release["version"] == previous["version"]:
+                    self.version_combo.setCurrentIndex(i)
+                    break
 
-        self.version_combo.setEnabled(True)
+        self.version_combo.setEnabled(self._controls_enabled)
         self.log(f"Found {len(releases)} release(s). Latest: v{releases[0]['version']}")
         self._refresh_update_state()
 
     def _on_fetch_error(self, error_msg):
-        self.version_combo.clear()
-        self.version_combo.addItem("Failed to load versions")
         self.log(f"Could not fetch releases: {error_msg}")
+        if not self._releases:
+            self.version_combo.clear()
+            self.version_combo.addItem("Failed to load versions")
+        # A failed refresh keeps the versions we already have. The voice check
+        # doesn't need them, so it still runs.
+        self._check_voice_update()
 
     def _refresh_update_state(self):
         """Update the banner and button text based on installed vs latest version."""
@@ -422,7 +460,9 @@ class MainWindow(QMainWindow):
         has_releases = bool(self._releases)
         installed = self._is_mod_installed()
         self._refresh_tou_voice_status()
-        self.install_btn.setEnabled(has_releases)
+        if not self._controls_enabled:
+            return  # an install is running; on_install_finished refreshes these
+        self.install_btn.setEnabled(has_releases and self._fetch_thread is None)
         self.uninstall_btn.setEnabled(installed)
         if self._update_version and installed:
             self.install_btn.setText("Update Mod")
@@ -444,6 +484,8 @@ class MainWindow(QMainWindow):
         return thread
 
     def _check_for_app_update(self):
+        if self._app_check_thread is not None:
+            return  # replacing a running QThread's reference would abort the app
         worker = updater.UpdateCheckWorker()
         worker.update_available.connect(self._on_app_update_available)
         worker.error.connect(
@@ -453,9 +495,14 @@ class MainWindow(QMainWindow):
         self._app_check_thread = self._run_in_thread(
             worker, (worker.update_available, worker.error)
         )
+        self._app_check_thread.finished.connect(self._on_app_check_done)
+
+    def _on_app_check_done(self):
+        self._app_check_thread = self._app_check_worker = None
 
     def _on_app_update_available(self, info):
         if not info:
+            self.log(f"The installer is up to date (v{APP_VERSION}).")
             return
         self.log(f"Installer update available: v{info['version']} (current: v{APP_VERSION})")
         if self._installing:
@@ -875,6 +922,8 @@ class MainWindow(QMainWindow):
                 "<b>Voice chat update available:</b> " + " and ".join(parts) + "."
             )
             self.log("Voice chat update available: " + ", ".join(parts))
+        elif info is not None:
+            self.log("Voice chat is up to date.")
 
     def _start_voice_update(self):
         info = self._voice_update
@@ -907,7 +956,9 @@ class MainWindow(QMainWindow):
 
     def _set_controls_enabled(self, enabled):
         """Enable/disable the interactive controls during an install."""
-        self.install_btn.setEnabled(enabled)
+        self._controls_enabled = enabled
+        self.refresh_btn.setEnabled(enabled and self._fetch_thread is None)
+        self.install_btn.setEnabled(enabled and self._fetch_thread is None)
         self.uninstall_btn.setEnabled(enabled)
         self.version_combo.setEnabled(enabled and bool(self._releases))
         self.steam_browse_btn.setEnabled(enabled)
