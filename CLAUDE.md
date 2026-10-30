@@ -40,6 +40,11 @@ Progress is a single 0–100 bar shared across phases; helpers take `progress_st
 A checkbox in the UI adds BetterCrewLink (https://github.com/OhMyGuus/BetterCrewLink, a standalone Electron app — not mod files) to either flow. After the mod is installed and its metadata written, `InstallWorker` fetches BetterCrewLink's `/releases/latest`, downloads the `*Setup*.exe` asset to a fresh temp dir (verified TLS only + SHA-256 `digest` check via `net.verify_sha256_digest`, since it's executed) and runs it with `/S` (silent, per-user NSIS, no UAC). When enabled the mod phases are scaled into 0–60 of the bar via `InstallWorker._report_progress` and BetterCrewLink takes 60–100. A BetterCrewLink failure doesn't fail the install; it's appended to the success message. Installed state/version is read from the `Uninstall` registry key (`DisplayName` starting `Better-CrewLink`). The installer never uninstalls it.
 
 ### Optional BetterCrewLink-TOU + voice bridge (alpha; `bridge.py`, `bettercrewlink.TOU`)
+Both halves are built and released by a separate project, `rroig7/whg-tou-mira` (usually checked
+out at `../whg-tou-mira`). **Read `docs/WHG-TOU-MIRA.md` first** when working on this feature. It
+covers what that project is, the release contract this installer depends on, and which repo to
+change for a given task.
+
 A second checkbox (`tou_checkbox`, worker flag `install_tou_voice`) is the *alternative* to
 official BetterCrewLink. It installs two things:
 
