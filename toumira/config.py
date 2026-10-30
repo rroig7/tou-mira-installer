@@ -49,7 +49,7 @@ BRIDGE_DLL_NAME = "TouMiraBclBridge.dll"
 # --- Installer self-update ---------------------------------------------------
 # Single source of truth for the installer's version. Must match the GitHub
 # release tag (``v<APP_VERSION>``) or users will be prompted to update forever.
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 APP_RELEASES_API_URL = (
     "https://api.github.com/repos/rroig7/tou-mira-installer/releases/latest"
 )
